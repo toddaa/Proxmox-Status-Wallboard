@@ -1,7 +1,7 @@
 "use client";
 
 import type { HostData, GuestData } from "@/types/proxmox";
-import { formatBytes, formatRate, formatUptime } from "@/lib/format";
+import { formatBytes, formatRate } from "@/lib/format";
 import RingGauge from "./RingGauge";
 
 interface HostPanelProps {

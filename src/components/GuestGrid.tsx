@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import type { GuestData } from "@/types/proxmox";
 import GuestCard from "./GuestCard";
 
@@ -17,7 +17,16 @@ export default function GuestGrid({
 }: GuestGridProps) {
   const [offset, setOffset] = useState(0);
   const [isSliding, setIsSliding] = useState(false);
-  const trackRef = useRef<HTMLDivElement>(null);
+  // Reset offset when the guest list length changes. Computing this during
+  // render (instead of in a useEffect) avoids a cascading render and is the
+  // React-recommended pattern for resetting derived state on prop change.
+  // https://react.dev/reference/react/useState#storing-information-from-previous-renders
+  const [prevGuestCount, setPrevGuestCount] = useState(guests.length);
+  if (prevGuestCount !== guests.length) {
+    setPrevGuestCount(guests.length);
+    setOffset(0);
+    setIsSliding(false);
+  }
 
   const canRotate = guests.length > visibleCount;
 
@@ -36,12 +45,6 @@ export default function GuestGrid({
     const timer = setInterval(rotateOne, rotateInterval * 1000);
     return () => clearInterval(timer);
   }, [rotateOne, rotateInterval, canRotate]);
-
-  // Reset offset if guest list changes
-  useEffect(() => {
-    setOffset(0);
-    setIsSliding(false);
-  }, [guests.length]);
 
   // Build the visible cards (visibleCount + 1 for the incoming card during slide)
   const displayCount = canRotate ? visibleCount + 1 : guests.length;
@@ -63,7 +66,6 @@ export default function GuestGrid({
 
       <div className="guest-grid-wrapper">
         <div
-          ref={trackRef}
           className="guest-track"
           style={{
             transform: isSliding

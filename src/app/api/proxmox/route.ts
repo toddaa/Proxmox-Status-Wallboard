@@ -1,5 +1,11 @@
-import { NextRequest, NextResponse } from "next/server";
-import type { GuestData, HostData, WallboardData } from "@/types/proxmox";
+import { NextResponse } from "next/server";
+import type {
+  GuestData,
+  HostData,
+  PveGuest,
+  PveNodeStatus,
+  WallboardData,
+} from "@/types/proxmox";
 
 // Disable Next.js route caching so every request hits Proxmox live
 export const dynamic = "force-dynamic";
@@ -31,7 +37,7 @@ function getConfig() {
 let cachedTicket: string | null = null;
 let cachedCsrf: string | null = null;
 
-async function pveRequest(path: string): Promise<any> {
+async function pveRequest(path: string): Promise<unknown> {
   const cfg = getConfig();
   const url = `https://${cfg.host}:${cfg.port}/api2/json${path}`;
   const headers: Record<string, string> = { Accept: "application/json" };
@@ -50,7 +56,7 @@ async function pveRequest(path: string): Promise<any> {
             password: cfg.pass,
           }),
           cache: "no-store",
-          // @ts-ignore — Node 18+ supports this for self-signed certs
+          // @ts-expect-error — Node 18+ supports this for self-signed certs
           rejectUnauthorized: false,
         }
       );
@@ -67,7 +73,7 @@ async function pveRequest(path: string): Promise<any> {
   const resp = await fetch(url, {
     headers,
     cache: "no-store",
-    // @ts-ignore
+    // @ts-expect-error — Node 18+ supports this for self-signed certs
     rejectUnauthorized: false,
   });
 
@@ -85,7 +91,7 @@ async function pveRequest(path: string): Promise<any> {
   return json.data;
 }
 
-export async function GET(_req: NextRequest) {
+export async function GET() {
   try {
     const cfg = getConfig();
 
@@ -96,11 +102,11 @@ export async function GET(_req: NextRequest) {
       );
     }
 
-    const [nodeStatus, qemuList, lxcList] = await Promise.all([
+    const [nodeStatus, qemuList, lxcList] = (await Promise.all([
       pveRequest(`/nodes/${cfg.node}/status`),
       pveRequest(`/nodes/${cfg.node}/qemu`),
       pveRequest(`/nodes/${cfg.node}/lxc`),
-    ]);
+    ])) as [PveNodeStatus, PveGuest[], PveGuest[]];
 
     const host: HostData = {
       name: cfg.node,
@@ -173,11 +179,10 @@ export async function GET(_req: NextRequest) {
     };
 
     return NextResponse.json(data);
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Proxmox API error:", err);
-    return NextResponse.json(
-      { error: err.message || "Failed to fetch Proxmox data" },
-      { status: 502 }
-    );
+    const message =
+      err instanceof Error ? err.message : "Failed to fetch Proxmox data";
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }

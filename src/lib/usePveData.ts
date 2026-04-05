@@ -81,10 +81,10 @@ export function usePveData({
       setLastUpdated(new Date());
       errCount.current = 0;
       setConsecutiveErrors(0);
-    } catch (err: any) {
+    } catch (err: unknown) {
       errCount.current++;
       setConsecutiveErrors(errCount.current);
-      setError(err.message || "Connection failed");
+      setError(err instanceof Error ? err.message : "Connection failed");
       setStatus("error");
     }
   }, []);
