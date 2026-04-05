@@ -46,9 +46,33 @@ pveum user token add wallboard@pve wallboard --privsep 0
 
 ### 2. Setup on Raspberry Pi
 
+You have two options: an **automated installer** that handles everything interactively, or a **manual setup** if you'd rather do each step yourself.
+
+#### Option A — Automated installer (recommended)
+
+The repo ships with a guided installer that uses `whiptail` (pre-installed on Raspberry Pi OS) to walk you through the entire setup. It installs Node.js 22, builds the app, generates `.env.local` from your answers, configures display rotation, and optionally sets up a systemd service and Chromium kiosk autostart.
+
 ```bash
-# Install Node.js 20+
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
+git clone <your-repo> proxmox-wallboard
+cd proxmox-wallboard
+sudo bash scripts/install-pi.sh
+```
+
+The installer will prompt you for:
+- Proxmox host/port/node
+- Auth method (token or password) and credentials
+- Wallboard title, poll interval, and rotate interval
+- Display orientation (0° / 90° / 180° / 270°)
+- Whether to create a systemd auto-start service
+- Whether to configure Chromium kiosk mode
+
+Re-running the installer pre-fills each prompt with your current values, so you can safely use it to tweak settings later. After it finishes, reboot for the display rotation to take effect.
+
+#### Option B — Manual setup
+
+```bash
+# Install Node.js 22+
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
 sudo apt install -y nodejs
 
 # Clone and install
@@ -67,6 +91,9 @@ npm run start
 ```
 
 ### 3. Auto-Start on Boot
+
+> If you used the automated installer above, skip this section — the service is already set up.
+
 
 Create a systemd service:
 
@@ -96,6 +123,9 @@ sudo systemctl start wallboard
 ```
 
 ### 4. Chromium Kiosk Mode
+
+> If you used the automated installer above, skip this section — kiosk mode is already configured (if you opted in).
+
 
 Create `/home/pi/start-kiosk.sh`:
 
