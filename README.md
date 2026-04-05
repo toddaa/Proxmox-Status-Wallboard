@@ -1,5 +1,7 @@
 # Proxmox Wallboard
 
+[![Build](https://github.com/toddaa/Proxmox-Status-Wallboard/actions/workflows/build.yml/badge.svg)](https://github.com/toddaa/Proxmox-Status-Wallboard/actions/workflows/build.yml)
+
 A Matrix-themed monitoring wallboard for Proxmox VE, built with Next.js / TypeScript / React. Designed to run on a Raspberry Pi connected to a vertical display on the same network as your homelab.
 
 ![Matrix green aesthetic with digital rain, ring gauges for host metrics, and rotating guest cards]
