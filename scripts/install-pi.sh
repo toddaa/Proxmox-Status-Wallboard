@@ -408,8 +408,16 @@ else
     sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && npm install --loglevel=error"
 fi
 
+# Turbopack doesn't support 32-bit ARM — fall back to Webpack on armhf
+BUILD_CMD="npm run build"
+ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+if [[ "$ARCH" == "armhf" || "$ARCH" == "armv7l" ]]; then
+  BUILD_CMD="npx next build --webpack"
+  echo "  ${C_DIM}32-bit ARM detected — using Webpack instead of Turbopack${C_RESET}"
+fi
+
 spin "Building Next.js production bundle" \
-  sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && npm run build"
+  sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && $BUILD_CMD"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 7: Systemd service
