@@ -2,17 +2,12 @@
 #
 # Proxmox Wallboard — Raspberry Pi installer
 #
-# Interactive installer that:
-#   1. Installs system dependencies (Node.js 22, git, build tools, whiptail)
-#   2. Installs npm packages and builds the app
-#   3. Prompts for Proxmox connection + wallboard settings and writes .env.local
-#   4. Configures display orientation via /boot/firmware/config.txt
-#   5. Optionally creates a systemd service to auto-start the wallboard
-#   6. Optionally configures Chromium kiosk autostart
+# Fully automated setup: after this script finishes and the Pi reboots,
+# the wallboard service starts, Chromium opens in kiosk mode, and you're
+# looking at your wallboard.
 #
 # Usage:
-#   curl -fsSL ... | bash          (not supported — needs a TTY)
-#   cd proxmox-wallboard && sudo bash scripts/install-pi.sh
+#   cd Proxmox-Status-Wallboard && sudo bash scripts/install-pi.sh
 #
 
 set -euo pipefail
@@ -22,150 +17,260 @@ C_RESET=$'\033[0m'
 C_GREEN=$'\033[32m'
 C_YELLOW=$'\033[33m'
 C_RED=$'\033[31m'
+C_CYAN=$'\033[36m'
+C_DIM=$'\033[2m'
 C_BOLD=$'\033[1m'
 
-info()  { echo "${C_GREEN}[✓]${C_RESET} $*"; }
-warn()  { echo "${C_YELLOW}[!]${C_RESET} $*"; }
-error() { echo "${C_RED}[✗]${C_RESET} $*" >&2; }
-step()  { echo; echo "${C_BOLD}── $* ──${C_RESET}"; }
+info()  { echo "${C_GREEN}  ✓${C_RESET} $*"; }
+warn()  { echo "${C_YELLOW}  !${C_RESET} $*"; }
+error() { echo "${C_RED}  ✗${C_RESET} $*" >&2; }
+die()   { error "$*"; exit 1; }
 
-die() { error "$*"; exit 1; }
+# ─── Progress display helpers ─────────────────────────────────────────────────
 
-require_root() {
-  if [[ $EUID -ne 0 ]]; then
-    die "This script must be run with sudo (installs packages + edits /boot/firmware/config.txt)."
-  fi
+# Prints a numbered step header with a box drawing border
+STEP_NUM=0
+TOTAL_STEPS=9
+step() {
+  STEP_NUM=$((STEP_NUM + 1))
+  echo
+  echo "${C_BOLD}${C_CYAN}┌─────────────────────────────────────────────────────────────┐${C_RESET}"
+  echo "${C_BOLD}${C_CYAN}│  Step ${STEP_NUM}/${TOTAL_STEPS}: $*$(printf '%*s' $((43 - ${#1})) '')│${C_RESET}"
+  echo "${C_BOLD}${C_CYAN}└─────────────────────────────────────────────────────────────┘${C_RESET}"
 }
 
-# The user who invoked sudo — we want npm / the app to live in their home, not root's
+# Spinner: run a command in the background and show a spinner + message
+# Usage: spin "message" command arg1 arg2 ...
+spin() {
+  local msg="$1"; shift
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local pid logfile
+  logfile=$(mktemp /tmp/wallboard-install-XXXXXX.log)
+
+  "$@" > "$logfile" 2>&1 &
+  pid=$!
+
+  local i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    printf "\r  ${C_CYAN}%s${C_RESET} %s" "${frames[$((i % ${#frames[@]}))]}" "$msg"
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  wait "$pid"
+  local exit_code=$?
+  printf "\r"
+
+  if [[ $exit_code -eq 0 ]]; then
+    info "$msg"
+  else
+    error "$msg — failed (see log below)"
+    echo "${C_DIM}"
+    tail -20 "$logfile"
+    echo "${C_RESET}"
+    rm -f "$logfile"
+    exit $exit_code
+  fi
+  rm -f "$logfile"
+}
+
+# Progress bar using whiptail gauge
+# Pipe percentages to it: (echo 50; echo 100) | gauge "title"
+gauge() {
+  whiptail --title "$1" --gauge "" 7 70 0
+}
+
+# ─── Preflight ────────────────────────────────────────────────────────────────
+if [[ $EUID -ne 0 ]]; then
+  die "This script must be run with sudo."
+fi
+
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
-# Resolve the project directory (the parent of scripts/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# ─── Preflight ────────────────────────────────────────────────────────────────
-require_root
-
-step "Proxmox Wallboard — Pi Installer"
-info "Project dir: $PROJECT_DIR"
-info "Install user: $REAL_USER ($REAL_HOME)"
+clear
+echo
+echo "${C_BOLD}${C_GREEN}  ╔═══════════════════════════════════════════════════════════╗${C_RESET}"
+echo "${C_BOLD}${C_GREEN}  ║          Proxmox Wallboard — Pi Installer                ║${C_RESET}"
+echo "${C_BOLD}${C_GREEN}  ╚═══════════════════════════════════════════════════════════╝${C_RESET}"
+echo
+echo "  ${C_DIM}Project dir :${C_RESET} $PROJECT_DIR"
+echo "  ${C_DIM}Install user:${C_RESET} $REAL_USER ($REAL_HOME)"
+echo "  ${C_DIM}Steps       :${C_RESET} $TOTAL_STEPS"
+echo
 
 if [[ ! -f "$PROJECT_DIR/package.json" ]]; then
   die "Could not find package.json in $PROJECT_DIR — run this from the cloned repo."
 fi
 
-# ─── System packages ──────────────────────────────────────────────────────────
-step "Installing system dependencies"
+sleep 1
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 1: System packages
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Installing system packages"
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq \
-  curl \
-  ca-certificates \
-  git \
-  build-essential \
-  whiptail >/dev/null
 
-# Node.js 22 (NodeSource)
+echo "  ${C_DIM}Updating package lists...${C_RESET}"
+spin "Updating apt package lists" apt-get update -qq
+
+# Install packages one group at a time for clear progress
+{
+  echo "10"; echo "# Installing core tools (curl, git, build-essential)..."
+  apt-get install -y -qq curl ca-certificates git build-essential whiptail >/dev/null 2>&1
+
+  echo "40"; echo "# Installing vim..."
+  apt-get install -y -qq vim >/dev/null 2>&1
+
+  echo "55"; echo "# Installing unclutter (hides mouse cursor)..."
+  apt-get install -y -qq unclutter >/dev/null 2>&1
+
+  echo "75"; echo "# Installing Chromium browser..."
+  apt-get install -y -qq chromium-browser >/dev/null 2>&1 || \
+    apt-get install -y -qq chromium >/dev/null 2>&1 || true
+
+  echo "100"; echo "# Done!"
+} | gauge "Installing system packages"
+
+info "Installed: curl, git, build-essential, vim, unclutter, chromium"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 2: Node.js
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Installing Node.js"
+
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -c2- | cut -d. -f1)" -lt 22 ]]; then
-  info "Installing Node.js 22 via NodeSource"
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
-  apt-get install -y -qq nodejs >/dev/null
+  {
+    echo "20"; echo "# Adding NodeSource repository..."
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1
+
+    echo "60"; echo "# Installing Node.js 22..."
+    apt-get install -y -qq nodejs >/dev/null 2>&1
+
+    echo "100"; echo "# Done!"
+  } | gauge "Installing Node.js 22"
+  info "Installed Node.js 22 via NodeSource"
 else
-  info "Node.js $(node -v) already installed"
+  info "Node.js $(node -v) already installed — skipping"
 fi
 
-info "Node: $(node -v)  npm: $(npm -v)"
+echo "  ${C_DIM}Node: $(node -v)  npm: $(npm -v)${C_RESET}"
 
-# ─── Interactive config prompts ───────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 3: Wallboard configuration (interactive prompts)
+# ═══════════════════════════════════════════════════════════════════════════════
 step "Wallboard configuration"
+
+echo "  ${C_DIM}You'll now be asked a series of questions to configure the wallboard.${C_RESET}"
+echo "  ${C_DIM}Press Cancel at any prompt to abort the installer.${C_RESET}"
+sleep 1
 
 ENV_FILE="$PROJECT_DIR/.env.local"
 
-# Load existing values (if any) as defaults, so re-running the installer doesn't nuke config
+# Load existing values as defaults so re-running the installer preserves config
 default() {
   local key="$1" fallback="$2"
   if [[ -f "$ENV_FILE" ]]; then
     local v
-    v=$(grep -E "^${key}=" "$ENV_FILE" | head -n1 | cut -d= -f2- || true)
+    v=$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2- || true)
     if [[ -n "$v" ]]; then echo "$v"; return; fi
   fi
   echo "$fallback"
 }
 
-PVE_HOST=$(whiptail --title "Proxmox Host" --inputbox \
+PVE_HOST=$(whiptail --title "Step 3a: Proxmox Host" --inputbox \
   "Proxmox VE hostname or IP address:" 10 70 "$(default PVE_HOST "192.168.1.100")" \
-  3>&1 1>&2 2>&3)
+  3>&1 1>&2 2>&3) || die "Cancelled by user"
+info "Proxmox host: $PVE_HOST"
 
-PVE_PORT=$(whiptail --title "Proxmox Port" --inputbox \
+PVE_PORT=$(whiptail --title "Step 3b: Proxmox Port" --inputbox \
   "Proxmox VE API port:" 10 70 "$(default PVE_PORT "8006")" \
-  3>&1 1>&2 2>&3)
+  3>&1 1>&2 2>&3) || die "Cancelled by user"
+info "Proxmox port: $PVE_PORT"
 
-PVE_NODE=$(whiptail --title "Proxmox Node" --inputbox \
+PVE_NODE=$(whiptail --title "Step 3c: Proxmox Node" --inputbox \
   "Node name (as shown in the PVE web UI):" 10 70 "$(default PVE_NODE "pve")" \
-  3>&1 1>&2 2>&3)
+  3>&1 1>&2 2>&3) || die "Cancelled by user"
+info "Proxmox node: $PVE_NODE"
 
-AUTH_METHOD=$(whiptail --title "Authentication" --menu \
+AUTH_METHOD=$(whiptail --title "Step 3d: Authentication" --menu \
   "How should the wallboard authenticate to Proxmox?" 12 70 2 \
   "token"    "API token (recommended)" \
   "password" "Username + password" \
-  3>&1 1>&2 2>&3)
+  3>&1 1>&2 2>&3) || die "Cancelled by user"
+info "Auth method: $AUTH_METHOD"
 
 if [[ "$AUTH_METHOD" == "token" ]]; then
-  PVE_TOKEN_ID=$(whiptail --title "Token ID" --inputbox \
+  PVE_TOKEN_ID=$(whiptail --title "Step 3e: Token ID" --inputbox \
     "API token ID (e.g. wallboard@pve!wallboard):" 10 70 \
     "$(default PVE_TOKEN_ID "wallboard@pve!wallboard")" \
-    3>&1 1>&2 2>&3)
-  PVE_TOKEN_SECRET=$(whiptail --title "Token Secret" --passwordbox \
+    3>&1 1>&2 2>&3) || die "Cancelled by user"
+  info "Token ID: $PVE_TOKEN_ID"
+
+  PVE_TOKEN_SECRET=$(whiptail --title "Step 3f: Token Secret" --passwordbox \
     "API token secret (UUID):" 10 70 "" \
-    3>&1 1>&2 2>&3)
+    3>&1 1>&2 2>&3) || die "Cancelled by user"
+  info "Token secret: (saved)"
 else
-  PVE_USER=$(whiptail --title "PVE User" --inputbox \
+  PVE_USER=$(whiptail --title "Step 3e: PVE User" --inputbox \
     "Proxmox user (e.g. root@pam):" 10 70 \
-    "$(default PVE_USER "root@pam")" 3>&1 1>&2 2>&3)
-  PVE_PASS=$(whiptail --title "PVE Password" --passwordbox \
-    "Password:" 10 70 "" 3>&1 1>&2 2>&3)
+    "$(default PVE_USER "root@pam")" 3>&1 1>&2 2>&3) || die "Cancelled by user"
+  info "PVE user: $PVE_USER"
+
+  PVE_PASS=$(whiptail --title "Step 3f: PVE Password" --passwordbox \
+    "Password:" 10 70 "" 3>&1 1>&2 2>&3) || die "Cancelled by user"
+  info "PVE password: (saved)"
 fi
 
-TITLE=$(whiptail --title "Wallboard Title" --inputbox \
+TITLE=$(whiptail --title "Step 3g: Wallboard Title" --inputbox \
   "Title shown in the header:" 10 70 \
-  "$(default NEXT_PUBLIC_TITLE "Proxmox Wallboard")" 3>&1 1>&2 2>&3)
+  "$(default NEXT_PUBLIC_TITLE "Proxmox Wallboard")" 3>&1 1>&2 2>&3) || die "Cancelled by user"
+info "Title: $TITLE"
 
-POLL_INTERVAL=$(whiptail --title "Poll Interval" --inputbox \
+POLL_INTERVAL=$(whiptail --title "Step 3h: Poll Interval" --inputbox \
   "How often to refresh Proxmox data (seconds):" 10 70 \
-  "$(default NEXT_PUBLIC_POLL_INTERVAL "10")" 3>&1 1>&2 2>&3)
+  "$(default NEXT_PUBLIC_POLL_INTERVAL "10")" 3>&1 1>&2 2>&3) || die "Cancelled by user"
+info "Poll interval: ${POLL_INTERVAL}s"
 
-ROTATE_INTERVAL=$(whiptail --title "Rotate Interval" --inputbox \
+ROTATE_INTERVAL=$(whiptail --title "Step 3i: Rotate Interval" --inputbox \
   "How often to rotate guest cards (seconds):" 10 70 \
-  "$(default NEXT_PUBLIC_ROTATE_INTERVAL "8")" 3>&1 1>&2 2>&3)
+  "$(default NEXT_PUBLIC_ROTATE_INTERVAL "8")" 3>&1 1>&2 2>&3) || die "Cancelled by user"
+info "Rotate interval: ${ROTATE_INTERVAL}s"
 
-# ─── Display orientation ──────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 4: Display orientation
+# ═══════════════════════════════════════════════════════════════════════════════
 step "Display orientation"
 
-ROTATION=$(whiptail --title "Screen Orientation" --menu \
-  "Pick display rotation (applied at the KMS level via /boot/firmware/config.txt):" 15 70 4 \
+ROTATION=$(whiptail --title "Step 4: Screen Orientation" --menu \
+  "Pick display rotation:" 15 70 4 \
   "0" "Normal (landscape)" \
   "1" "90°  — rotated right (portrait)" \
   "2" "180° — upside down" \
   "3" "270° — rotated left (portrait)" \
-  3>&1 1>&2 2>&3)
+  3>&1 1>&2 2>&3) || die "Cancelled by user"
 
 CONFIG_TXT="/boot/firmware/config.txt"
 [[ -f "$CONFIG_TXT" ]] || CONFIG_TXT="/boot/config.txt"
 
 if [[ -f "$CONFIG_TXT" ]]; then
-  # Remove any existing display_hdmi_rotate / display_lcd_rotate lines, then append fresh one
   sed -i '/^display_hdmi_rotate=/d; /^display_lcd_rotate=/d' "$CONFIG_TXT"
   echo "display_hdmi_rotate=$ROTATION" >> "$CONFIG_TXT"
-  info "Set display_hdmi_rotate=$ROTATION in $CONFIG_TXT (takes effect on next reboot)"
+  info "Display rotation: $ROTATION (in $CONFIG_TXT)"
 else
-  warn "Could not find $CONFIG_TXT — skipping display rotation (not a Raspberry Pi?)"
+  warn "Could not find config.txt — skipping display rotation"
 fi
 
-# ─── Write .env.local ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 5: Write .env.local
+# ═══════════════════════════════════════════════════════════════════════════════
 step "Writing .env.local"
+
+echo "  ${C_DIM}Writing configuration to $ENV_FILE${C_RESET}"
 
 cat > "$ENV_FILE" <<EOF
 # ── Proxmox Connection ──
@@ -201,25 +306,35 @@ EOF
 
 chown "$REAL_USER:$REAL_USER" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
-info "Wrote $ENV_FILE"
+info "Wrote $ENV_FILE (permissions: 600)"
 
-# ─── Install + build ──────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 6: Install npm packages + build
+# ═══════════════════════════════════════════════════════════════════════════════
 step "Installing npm packages and building"
 
-# Run as the real user so node_modules and .next aren't owned by root
+echo "  ${C_DIM}This may take a few minutes on a Raspberry Pi...${C_RESET}"
+
 if [[ -f "$PROJECT_DIR/package-lock.json" ]]; then
-  sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && npm ci"
+  spin "Installing npm packages (npm ci)" \
+    sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && npm ci --loglevel=error"
 else
-  sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && npm install"
+  spin "Installing npm packages (npm install)" \
+    sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && npm install --loglevel=error"
 fi
-sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && npm run build"
 
-# ─── Optional: systemd service ────────────────────────────────────────────────
-if whiptail --title "Auto-start" --yesno \
-  "Create a systemd service to run the wallboard on boot?" 10 70; then
+spin "Building Next.js production bundle" \
+  sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && npm run build"
 
-  SERVICE_FILE="/etc/systemd/system/proxmox-wallboard.service"
-  cat > "$SERVICE_FILE" <<EOF
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 7: Systemd service
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Creating systemd service"
+
+echo "  ${C_DIM}Writing proxmox-wallboard.service${C_RESET}"
+
+SERVICE_FILE="/etc/systemd/system/proxmox-wallboard.service"
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Proxmox Wallboard
 After=network-online.target
@@ -230,7 +345,7 @@ Type=simple
 User=$REAL_USER
 WorkingDirectory=$PROJECT_DIR
 ExecStart=/usr/bin/npm start
-Restart=on-failure
+Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
 
@@ -238,51 +353,149 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload
-  systemctl enable proxmox-wallboard.service >/dev/null
-  systemctl restart proxmox-wallboard.service
-  info "Installed and started proxmox-wallboard.service"
+spin "Reloading systemd daemon" systemctl daemon-reload
+spin "Enabling proxmox-wallboard.service" systemctl enable proxmox-wallboard.service
+info "Service will start automatically on boot"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 8: Chromium kiosk autostart
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Configuring Chromium kiosk mode"
+
+# Detect chromium binary name (Bookworm = "chromium", older = "chromium-browser")
+if command -v chromium-browser >/dev/null 2>&1; then
+  CHROMIUM_BIN="chromium-browser"
+elif command -v chromium >/dev/null 2>&1; then
+  CHROMIUM_BIN="chromium"
+else
+  warn "Chromium not found — kiosk autostart may need manual adjustment"
+  CHROMIUM_BIN="chromium-browser"
 fi
+info "Chromium binary: $CHROMIUM_BIN"
 
-# ─── Optional: Chromium kiosk autostart ───────────────────────────────────────
-if whiptail --title "Kiosk mode" --yesno \
-  "Configure Chromium to launch in kiosk mode at login and display the wallboard?\n\n(Requires Raspberry Pi OS with a desktop and auto-login enabled.)" 12 70; then
+# Create a launcher script that waits for the wallboard server before opening Chromium
+echo "  ${C_DIM}Creating kiosk launcher script...${C_RESET}"
+KIOSK_SCRIPT="$REAL_HOME/start-wallboard-kiosk.sh"
+cat > "$KIOSK_SCRIPT" <<KIOSK
+#!/usr/bin/env bash
+#
+# Wait for the wallboard server to be ready, then launch Chromium in kiosk mode.
+# This script is started automatically on desktop login.
+#
 
-  # Bookworm uses labwc/wayfire; Bullseye uses LXDE. Cover both by writing a
-  # desktop autostart entry in the user's ~/.config/autostart — most DEs honor it.
-  AUTOSTART_DIR="$REAL_HOME/.config/autostart"
-  sudo -u "$REAL_USER" mkdir -p "$AUTOSTART_DIR"
+# Hide the mouse cursor
+unclutter -idle 0.5 -root &
 
-  cat > "$AUTOSTART_DIR/proxmox-wallboard.desktop" <<EOF
+# Disable screen blanking / power management
+xset s off 2>/dev/null || true
+xset -dpms 2>/dev/null || true
+xset s noblank 2>/dev/null || true
+
+# Wait for the wallboard server (up to 120 seconds)
+echo "Waiting for wallboard server..."
+TRIES=0
+MAX_TRIES=60
+until curl -sf http://localhost:3000 > /dev/null 2>&1; do
+  TRIES=\$((TRIES + 1))
+  if [[ \$TRIES -ge \$MAX_TRIES ]]; then
+    echo "Wallboard server did not start in time. Launching browser anyway."
+    break
+  fi
+  sleep 2
+done
+echo "Server is ready — launching kiosk."
+
+# Launch Chromium in kiosk mode
+exec $CHROMIUM_BIN \\
+  --noerrdialogs \\
+  --disable-infobars \\
+  --disable-translate \\
+  --no-first-run \\
+  --disable-features=TranslateUI \\
+  --check-for-update-interval=31536000 \\
+  --kiosk \\
+  http://localhost:3000
+KIOSK
+
+chmod +x "$KIOSK_SCRIPT"
+chown "$REAL_USER:$REAL_USER" "$KIOSK_SCRIPT"
+info "Created kiosk launcher: $KIOSK_SCRIPT"
+
+# --- Autostart entries (cover Bookworm labwc, Bullseye LXDE, and XDG) ---
+
+echo "  ${C_DIM}Writing desktop autostart entries...${C_RESET}"
+
+# XDG autostart (works on LXDE/Bullseye and many other DEs)
+XDG_AUTOSTART_DIR="$REAL_HOME/.config/autostart"
+sudo -u "$REAL_USER" mkdir -p "$XDG_AUTOSTART_DIR"
+cat > "$XDG_AUTOSTART_DIR/proxmox-wallboard.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Proxmox Wallboard Kiosk
-Exec=sh -c 'sleep 10 && chromium-browser --noerrdialogs --disable-infobars --kiosk http://localhost:3000'
+Exec=bash $KIOSK_SCRIPT
 X-GNOME-Autostart-enabled=true
 EOF
+chown "$REAL_USER:$REAL_USER" "$XDG_AUTOSTART_DIR/proxmox-wallboard.desktop"
+info "Added XDG autostart entry"
 
-  chown -R "$REAL_USER:$REAL_USER" "$AUTOSTART_DIR"
-  info "Configured Chromium kiosk autostart at $AUTOSTART_DIR/proxmox-wallboard.desktop"
-
-  # Disable screen blanking — annoying for a wallboard
-  if command -v raspi-config >/dev/null 2>&1; then
-    raspi-config nonint do_blanking 1 || true
-    info "Disabled screen blanking via raspi-config"
+# labwc autostart (Bookworm with Wayland)
+LABWC_AUTOSTART="$REAL_HOME/.config/labwc/autostart"
+if [[ -d "$REAL_HOME/.config/labwc" ]] || [[ -d "/etc/xdg/labwc" ]]; then
+  sudo -u "$REAL_USER" mkdir -p "$(dirname "$LABWC_AUTOSTART")"
+  if ! grep -qF "start-wallboard-kiosk" "$LABWC_AUTOSTART" 2>/dev/null; then
+    echo "bash $KIOSK_SCRIPT &" >> "$LABWC_AUTOSTART"
+    chown "$REAL_USER:$REAL_USER" "$LABWC_AUTOSTART"
+    info "Added labwc autostart entry"
   fi
 fi
 
-# ─── Done ─────────────────────────────────────────────────────────────────────
-step "Install complete"
-cat <<EOF
+# LXDE autostart (Bullseye fallback)
+LXDE_AUTOSTART="$REAL_HOME/.config/lxsession/LXDE-pi/autostart"
+if [[ -d "$REAL_HOME/.config/lxsession/LXDE-pi" ]]; then
+  if ! grep -qF "start-wallboard-kiosk" "$LXDE_AUTOSTART" 2>/dev/null; then
+    echo "@bash $KIOSK_SCRIPT" >> "$LXDE_AUTOSTART"
+    chown "$REAL_USER:$REAL_USER" "$LXDE_AUTOSTART"
+    info "Added LXDE autostart entry"
+  fi
+fi
 
-  ${C_GREEN}✓${C_RESET} Dependencies installed
-  ${C_GREEN}✓${C_RESET} .env.local written to $ENV_FILE
-  ${C_GREEN}✓${C_RESET} App built
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 9: Auto-login + screen blanking + reboot
+# ═══════════════════════════════════════════════════════════════════════════════
+step "Finalizing system settings"
 
-  Start manually:   cd $PROJECT_DIR && npm start
-  Or via service:   sudo systemctl status proxmox-wallboard
+echo "  ${C_DIM}Configuring auto-login and display settings...${C_RESET}"
 
-  ${C_YELLOW}Reboot required${C_RESET} for the display rotation change to take effect:
-    sudo reboot
+if command -v raspi-config >/dev/null 2>&1; then
+  spin "Enabling desktop auto-login" raspi-config nonint do_boot_behaviour B4
+  spin "Disabling screen blanking" raspi-config nonint do_blanking 1
+else
+  warn "raspi-config not found — please enable desktop auto-login manually"
+fi
 
-EOF
+# ─── Summary + reboot ────────────────────────────────────────────────────────
+echo
+echo "${C_BOLD}${C_GREEN}  ╔═══════════════════════════════════════════════════════════╗${C_RESET}"
+echo "${C_BOLD}${C_GREEN}  ║                    Install Complete!                      ║${C_RESET}"
+echo "${C_BOLD}${C_GREEN}  ╠═══════════════════════════════════════════════════════════╣${C_RESET}"
+echo "${C_GREEN}  ║${C_RESET}  ✓ System packages   ${C_DIM}node, vim, unclutter, chromium${C_RESET}       ${C_GREEN}║${C_RESET}"
+echo "${C_GREEN}  ║${C_RESET}  ✓ Configuration     ${C_DIM}.env.local written${C_RESET}                   ${C_GREEN}║${C_RESET}"
+echo "${C_GREEN}  ║${C_RESET}  ✓ App built         ${C_DIM}Next.js production bundle${C_RESET}            ${C_GREEN}║${C_RESET}"
+echo "${C_GREEN}  ║${C_RESET}  ✓ Systemd service   ${C_DIM}proxmox-wallboard.service${C_RESET}            ${C_GREEN}║${C_RESET}"
+echo "${C_GREEN}  ║${C_RESET}  ✓ Kiosk mode        ${C_DIM}Chromium fullscreen on boot${C_RESET}          ${C_GREEN}║${C_RESET}"
+echo "${C_GREEN}  ║${C_RESET}  ✓ Auto-login        ${C_DIM}desktop login on boot${C_RESET}                ${C_GREEN}║${C_RESET}"
+echo "${C_GREEN}  ║${C_RESET}  ✓ Display           ${C_DIM}rotation=$ROTATION, blanking off${C_RESET}              ${C_GREEN}║${C_RESET}"
+echo "${C_BOLD}${C_GREEN}  ╚═══════════════════════════════════════════════════════════╝${C_RESET}"
+echo
+echo "  ${C_BOLD}After reboot the wallboard will start automatically.${C_RESET}"
+echo
+
+# Countdown to reboot
+for i in 10 9 8 7 6 5 4 3 2 1; do
+  printf "\r  ${C_YELLOW}Rebooting in %2d seconds... (Ctrl+C to cancel)${C_RESET}" "$i"
+  sleep 1
+done
+echo
+echo
+echo "  ${C_BOLD}Rebooting now...${C_RESET}"
+reboot

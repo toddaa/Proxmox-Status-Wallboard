@@ -55,8 +55,8 @@ You have two options: an **automated installer** that handles everything interac
 The repo ships with a guided installer that uses `whiptail` (pre-installed on Raspberry Pi OS) to walk you through the entire setup. It installs Node.js 22, builds the app, generates `.env.local` from your answers, configures display rotation, and optionally sets up a systemd service and Chromium kiosk autostart.
 
 ```bash
-git clone <your-repo> proxmox-wallboard
-cd proxmox-wallboard
+git clone https://github.com/toddaa/Proxmox-Status-Wallboard.git
+cd Proxmox-Status-Wallboard
 sudo bash scripts/install-pi.sh
 ```
 
