@@ -58,7 +58,7 @@ spin() {
   local msg="$1"; shift
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local logfile
-  logfile=$(mktemp /tmp/wallboard-install-XXXXXX.log)
+  logfile=$(mktemp /var/tmp/wallboard-install-XXXXXX.log)
 
   # Run in background — disable ERR trap in child so we can handle it
   ( trap - ERR; "$@" ) > "$logfile" 2>&1 &
@@ -152,25 +152,28 @@ spin "Updating apt package lists" apt-get update -qq
   echo "35"; echo "# Installing vim..."
   apt-get install -y -qq vim >/dev/null 2>&1 || true
 
-  echo "50"; echo "# Installing unclutter (hides mouse cursor)..."
+  echo "45"; echo "# Installing labwc (Wayland compositor)..."
+  apt-get install -y -qq labwc >/dev/null 2>&1 || true
+
+  echo "55"; echo "# Installing unclutter (hides mouse cursor)..."
   apt-get install -y -qq unclutter >/dev/null 2>&1 || true
 
-  echo "65"; echo "# Installing Chromium browser..."
+  echo "70"; echo "# Installing Chromium browser..."
   apt-get install -y -qq chromium >/dev/null 2>&1 || \
     apt-get install -y -qq chromium-browser >/dev/null 2>&1 || true
 
-  echo "80"; echo "# Installing wlr-randr (Wayland display control)..."
+  echo "85"; echo "# Installing wlr-randr (Wayland display control)..."
   apt-get install -y -qq wlr-randr >/dev/null 2>&1 || true
 
   echo "100"; echo "# Done!"
 ) | gauge "Installing system packages"
 
 # Verify critical packages installed
-for cmd in curl git vim; do
+for cmd in curl git vim labwc; do
   command -v "$cmd" >/dev/null 2>&1 || die "Failed to install $cmd — check your apt sources"
 done
 
-info "Installed: curl, git, build-essential, vim, unclutter, chromium, wlr-randr"
+info "Installed: curl, git, build-essential, vim, labwc, unclutter, chromium, wlr-randr"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 2: Node.js
@@ -410,7 +413,7 @@ if [[ $((TOTAL_MEM_MB + CURRENT_SWAP_MB)) -lt 1024 ]]; then
 
   if [[ "$SWAP_INCREASED" == false ]]; then
     # Fallback: create a swap file directly
-    SWAP_FILE="/tmp/wallboard-build-swap"
+    SWAP_FILE="/var/tmp/wallboard-build-swap"
     rm -f "$SWAP_FILE"
     if dd if=/dev/zero of="$SWAP_FILE" bs=1M count=2048 status=progress 2>/dev/null && \
        chmod 600 "$SWAP_FILE" && \
@@ -461,9 +464,9 @@ if [[ "$SWAP_INCREASED" == true ]]; then
     dphys-swapfile setup >/dev/null 2>&1 || true
     dphys-swapfile swapon >/dev/null 2>&1 || true
   fi
-  if [[ -f "/tmp/wallboard-build-swap" ]]; then
-    swapoff /tmp/wallboard-build-swap 2>/dev/null || true
-    rm -f /tmp/wallboard-build-swap
+  if [[ -f "/var/tmp/wallboard-build-swap" ]]; then
+    swapoff /var/tmp/wallboard-build-swap 2>/dev/null || true
+    rm -f /var/tmp/wallboard-build-swap
   fi
   info "Swap restored"
 fi
@@ -637,16 +640,47 @@ step "Finalizing system settings"
 
 echo "  ${C_DIM}Configuring auto-login and display settings...${C_RESET}"
 
-if command -v raspi-config >/dev/null 2>&1; then
-  raspi-config nonint do_boot_behaviour B4 2>/dev/null && \
-    info "Enabled desktop auto-login" || \
-    warn "Could not enable auto-login via raspi-config — enable it manually in raspi-config"
+# --- Console auto-login ---
+# Ensure getty on tty1 auto-logs in the wallboard user
+GETTY_OVERRIDE="/etc/systemd/system/getty@tty1.service.d/autologin.conf"
+mkdir -p "$(dirname "$GETTY_OVERRIDE")"
+cat > "$GETTY_OVERRIDE" <<EOF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin $REAL_USER --noclear %I \$TERM
+EOF
+info "Console auto-login configured for $REAL_USER"
 
+# --- Auto-start labwc from console login ---
+# Add labwc launch to .bash_profile so it starts the Wayland compositor
+# when logging in on tty1 (physical console), but not on SSH sessions.
+PROFILE_FILE="$REAL_HOME/.bash_profile"
+LABWC_LAUNCH_MARKER="# >>> proxmox-wallboard labwc autostart >>>"
+
+if ! grep -qF "$LABWC_LAUNCH_MARKER" "$PROFILE_FILE" 2>/dev/null; then
+  cat >> "$PROFILE_FILE" <<'LABWC_PROFILE'
+
+# >>> proxmox-wallboard labwc autostart >>>
+# Auto-start labwc on tty1 (console login only, not SSH)
+if [ "$(tty)" = "/dev/tty1" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+  export XDG_SESSION_TYPE=wayland
+  exec labwc
+fi
+# <<< proxmox-wallboard labwc autostart <<<
+LABWC_PROFILE
+  chown "$REAL_USER:$REAL_USER" "$PROFILE_FILE"
+  info "labwc auto-start added to .bash_profile (tty1 only)"
+else
+  info "labwc auto-start already in .bash_profile — skipping"
+fi
+
+# --- raspi-config settings ---
+if command -v raspi-config >/dev/null 2>&1; then
   raspi-config nonint do_blanking 1 2>/dev/null && \
     info "Disabled screen blanking (raspi-config)" || \
     warn "Could not disable screen blanking via raspi-config"
 else
-  warn "raspi-config not found — please enable desktop auto-login manually"
+  warn "raspi-config not found"
 fi
 
 # ─── Summary + reboot ────────────────────────────────────────────────────────
@@ -654,7 +688,7 @@ echo
 echo "${C_BOLD}${C_GREEN}  ╔═══════════════════════════════════════════════════════════╗${C_RESET}"
 echo "${C_BOLD}${C_GREEN}  ║                    Install Complete!                      ║${C_RESET}"
 echo "${C_BOLD}${C_GREEN}  ╠═══════════════════════════════════════════════════════════╣${C_RESET}"
-echo "${C_GREEN}  ║${C_RESET}  ✓ System packages   ${C_DIM}node, vim, unclutter, chromium${C_RESET}       ${C_GREEN}║${C_RESET}"
+echo "${C_GREEN}  ║${C_RESET}  ✓ System packages   ${C_DIM}node, vim, labwc, chromium${C_RESET}           ${C_GREEN}║${C_RESET}"
 echo "${C_GREEN}  ║${C_RESET}  ✓ Configuration     ${C_DIM}.env.local written${C_RESET}                   ${C_GREEN}║${C_RESET}"
 echo "${C_GREEN}  ║${C_RESET}  ✓ App built         ${C_DIM}Next.js production bundle${C_RESET}            ${C_GREEN}║${C_RESET}"
 echo "${C_GREEN}  ║${C_RESET}  ✓ Systemd service   ${C_DIM}proxmox-wallboard.service${C_RESET}            ${C_GREEN}║${C_RESET}"
