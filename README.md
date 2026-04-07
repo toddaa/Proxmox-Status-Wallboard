@@ -73,9 +73,11 @@ Re-running the installer pre-fills each prompt with your current values, so you 
 #### Option B — Manual setup
 
 ```bash
-# Install Node.js 22+
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
-sudo apt install -y nodejs
+# Install Node.js 20+ (Trixie/Debian 13 ships Node 20 in its repos)
+sudo apt install -y nodejs npm
+# Or, on older distros without Node 20+, use NodeSource:
+# curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
+# sudo apt install -y nodejs
 
 # Clone and install
 git clone <your-repo> proxmox-wallboard

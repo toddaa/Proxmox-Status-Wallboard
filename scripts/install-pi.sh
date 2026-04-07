@@ -171,38 +171,42 @@ info "Installed: curl, git, build-essential, vim, unclutter, chromium, wlr-randr
 # ═══════════════════════════════════════════════════════════════════════════════
 step "Installing Node.js"
 
+NODE_MIN=20
+
 install_node() {
-  # Strategy 1: System repos (Trixie/Debian 13 ships Node.js 22 natively)
+  # Strategy 1: System repos (Trixie ships Node 20, newer distros may have 22+)
   echo "  ${C_DIM}Trying system repos first (apt install nodejs)...${C_RESET}"
   if apt-get install -y -qq nodejs npm >/dev/null 2>&1; then
     local ver
     ver=$(node -v 2>/dev/null | cut -c2- | cut -d. -f1)
-    if [[ "$ver" -ge 22 ]]; then
+    if [[ "$ver" -ge $NODE_MIN ]]; then
       info "Installed Node.js $(node -v) from system repos"
       return 0
     fi
-    echo "  ${C_DIM}System repo has Node $ver (need 22+), trying NodeSource...${C_RESET}"
+    echo "  ${C_DIM}System repo has Node $ver (need ${NODE_MIN}+), trying NodeSource...${C_RESET}"
   fi
 
-  # Strategy 2: NodeSource (works on Bullseye/Bookworm, may not support Trixie)
+  # Strategy 2: NodeSource (may not support all architectures or distros)
   echo "  ${C_DIM}Adding NodeSource repository...${C_RESET}"
-  if curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1; then
+  if curl -fsSL https://deb.nodesource.com/setup_${NODE_MIN}.x | bash - >/dev/null 2>&1; then
     if apt-get install -y -qq nodejs >/dev/null 2>&1; then
       info "Installed Node.js $(node -v) via NodeSource"
       return 0
     fi
   fi
+  echo "  ${C_DIM}NodeSource not available for this platform, trying official binary...${C_RESET}"
 
   # Strategy 3: Download official Node.js binary
-  echo "  ${C_DIM}NodeSource failed, downloading official Node.js binary...${C_RESET}"
   local arch
   arch=$(dpkg --print-architecture)
+  # Node.js 20 still provides armv7l builds; Node 22+ does not
   local node_arch="linux-arm64"
   [[ "$arch" == "armhf" ]] && node_arch="linux-armv7l"
   [[ "$arch" == "amd64" ]] && node_arch="linux-x64"
 
-  local tarball="node-v22.14.0-${node_arch}.tar.xz"
-  local url="https://nodejs.org/dist/v22.14.0/${tarball}"
+  local node_ver="v20.19.2"
+  local tarball="node-${node_ver}-${node_arch}.tar.xz"
+  local url="https://nodejs.org/dist/${node_ver}/${tarball}"
 
   if curl -fsSL "$url" -o "/tmp/$tarball"; then
     tar -xJf "/tmp/$tarball" -C /usr/local --strip-components=1
@@ -214,14 +218,14 @@ install_node() {
   return 1
 }
 
-if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -c2- | cut -d. -f1)" -lt 22 ]]; then
-  spin "Installing Node.js 22" install_node
+if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -c2- | cut -d. -f1)" -lt $NODE_MIN ]]; then
+  spin "Installing Node.js ${NODE_MIN}+" install_node
 else
   info "Node.js $(node -v) already installed — skipping"
 fi
 
 if ! command -v node >/dev/null 2>&1; then
-  die "Failed to install Node.js. Please install Node.js 22+ manually and re-run this script."
+  die "Failed to install Node.js. Please install Node.js ${NODE_MIN}+ manually and re-run this script."
 fi
 
 echo "  ${C_DIM}Node: $(node -v)  npm: $(npm -v)${C_RESET}"
