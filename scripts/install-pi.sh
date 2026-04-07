@@ -13,7 +13,13 @@
 #   cd Proxmox-Status-Wallboard && sudo bash scripts/install-pi.sh
 #
 
-set -euo pipefail
+# NOTE: We intentionally do NOT use `set -euo pipefail` here. It causes
+# silent deaths on low-level commands (swap setup, apt fallbacks, etc.)
+# that we want to handle gracefully. Instead, we check critical commands
+# explicitly with || die/|| warn and use a trap for unexpected crashes.
+set -u  # Catch undefined variables, but don't exit on errors
+
+trap 'error "Script failed unexpectedly at line $LINENO (exit code $?)"; error "Please report this issue with the output above."; exit 1' ERR
 
 # ─── Colors / helpers ─────────────────────────────────────────────────────────
 C_RESET=$'\033[0m'
@@ -35,23 +41,28 @@ STEP_NUM=0
 TOTAL_STEPS=9
 step() {
   STEP_NUM=$((STEP_NUM + 1))
+  local label="$1"
+  local pad_len=$((43 - ${#label}))
+  [[ $pad_len -lt 0 ]] && pad_len=0
   local pad
-  pad=$(printf '%*s' $((43 - ${#1})) '')
+  pad=$(printf '%*s' "$pad_len" '')
   echo
   echo "${C_BOLD}${C_CYAN}┌─────────────────────────────────────────────────────────────┐${C_RESET}"
-  echo "${C_BOLD}${C_CYAN}│  Step ${STEP_NUM}/${TOTAL_STEPS}: ${1}${pad}│${C_RESET}"
+  echo "${C_BOLD}${C_CYAN}│  Step ${STEP_NUM}/${TOTAL_STEPS}: ${label}${pad}│${C_RESET}"
   echo "${C_BOLD}${C_CYAN}└─────────────────────────────────────────────────────────────┘${C_RESET}"
 }
 
 # Spinner: run a command in the background and show a spinner + message
+# On failure, shows the last 20 lines of output and exits.
 spin() {
   local msg="$1"; shift
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-  local pid logfile
+  local logfile
   logfile=$(mktemp /tmp/wallboard-install-XXXXXX.log)
 
-  "$@" > "$logfile" 2>&1 &
-  pid=$!
+  # Run in background — disable ERR trap in child so we can handle it
+  ( trap - ERR; "$@" ) > "$logfile" 2>&1 &
+  local pid=$!
 
   local i=0
   while kill -0 "$pid" 2>/dev/null; do
@@ -67,12 +78,12 @@ spin() {
   if [[ $exit_code -eq 0 ]]; then
     info "$msg"
   else
-    error "$msg — failed (see log below)"
+    error "$msg — failed (exit code $exit_code, log below)"
     echo "${C_DIM}"
     tail -20 "$logfile"
     echo "${C_RESET}"
     rm -f "$logfile"
-    exit $exit_code
+    die "Build/install step failed. Fix the issue above and re-run the installer."
   fi
   rm -f "$logfile"
 }
@@ -83,14 +94,12 @@ gauge() {
 }
 
 # ─── Detect OS ────────────────────────────────────────────────────────────────
-detect_os() {
-  OS_CODENAME="unknown"
-  if [[ -f /etc/os-release ]]; then
-    # shellcheck disable=SC1091
-    source /etc/os-release
-    OS_CODENAME="${VERSION_CODENAME:-unknown}"
-  fi
-}
+OS_CODENAME="unknown"
+if [[ -f /etc/os-release ]]; then
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  OS_CODENAME="${VERSION_CODENAME:-unknown}"
+fi
 
 # ─── Preflight ────────────────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
@@ -102,8 +111,7 @@ REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-detect_os
+ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
 
 clear
 echo
@@ -114,6 +122,7 @@ echo
 echo "  ${C_DIM}Project dir :${C_RESET} $PROJECT_DIR"
 echo "  ${C_DIM}Install user:${C_RESET} $REAL_USER ($REAL_HOME)"
 echo "  ${C_DIM}OS codename :${C_RESET} $OS_CODENAME"
+echo "  ${C_DIM}Architecture:${C_RESET} $ARCH"
 echo "  ${C_DIM}Steps       :${C_RESET} $TOTAL_STEPS"
 echo
 
@@ -133,19 +142,18 @@ export DEBIAN_FRONTEND=noninteractive
 echo "  ${C_DIM}Updating package lists...${C_RESET}"
 spin "Updating apt package lists" apt-get update -qq
 
-# Run installs inside a subshell with errexit disabled so one failure
-# doesn't kill the gauge pipeline (which would exit the whole script).
+# Install packages via gauge progress bar. Each apt-get has || true so
+# failures in optional packages (chromium name varies, wlr-randr) don't
+# halt the installer.
 (
-  set +e
-
   echo "10"; echo "# Installing core tools (curl, git, build-essential)..."
-  apt-get install -y -qq curl ca-certificates git build-essential whiptail >/dev/null 2>&1
+  apt-get install -y -qq curl ca-certificates git build-essential whiptail >/dev/null 2>&1 || true
 
   echo "35"; echo "# Installing vim..."
-  apt-get install -y -qq vim >/dev/null 2>&1
+  apt-get install -y -qq vim >/dev/null 2>&1 || true
 
   echo "50"; echo "# Installing unclutter (hides mouse cursor)..."
-  apt-get install -y -qq unclutter >/dev/null 2>&1
+  apt-get install -y -qq unclutter >/dev/null 2>&1 || true
 
   echo "65"; echo "# Installing Chromium browser..."
   apt-get install -y -qq chromium >/dev/null 2>&1 || \
@@ -159,9 +167,7 @@ spin "Updating apt package lists" apt-get update -qq
 
 # Verify critical packages installed
 for cmd in curl git vim; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    die "Failed to install $cmd — check your apt sources"
-  fi
+  command -v "$cmd" >/dev/null 2>&1 || die "Failed to install $cmd — check your apt sources"
 done
 
 info "Installed: curl, git, build-essential, vim, unclutter, chromium, wlr-randr"
@@ -173,59 +179,40 @@ step "Installing Node.js"
 
 NODE_MIN=20
 
-install_node() {
-  # Strategy 1: System repos (Trixie ships Node 20, newer distros may have 22+)
-  echo "  ${C_DIM}Trying system repos first (apt install nodejs)...${C_RESET}"
-  if apt-get install -y -qq nodejs npm >/dev/null 2>&1; then
-    local ver
-    ver=$(node -v 2>/dev/null | cut -c2- | cut -d. -f1)
-    if [[ "$ver" -ge $NODE_MIN ]]; then
-      info "Installed Node.js $(node -v) from system repos"
-      return 0
-    fi
-    echo "  ${C_DIM}System repo has Node $ver (need ${NODE_MIN}+), trying NodeSource...${C_RESET}"
-  fi
-
-  # Strategy 2: NodeSource (may not support all architectures or distros)
-  echo "  ${C_DIM}Adding NodeSource repository...${C_RESET}"
-  if curl -fsSL https://deb.nodesource.com/setup_${NODE_MIN}.x | bash - >/dev/null 2>&1; then
-    if apt-get install -y -qq nodejs >/dev/null 2>&1; then
-      info "Installed Node.js $(node -v) via NodeSource"
-      return 0
-    fi
-  fi
-  echo "  ${C_DIM}NodeSource not available for this platform, trying official binary...${C_RESET}"
-
-  # Strategy 3: Download official Node.js binary
-  local arch
-  arch=$(dpkg --print-architecture)
-  # Node.js 20 still provides armv7l builds; Node 22+ does not
-  local node_arch="linux-arm64"
-  [[ "$arch" == "armhf" ]] && node_arch="linux-armv7l"
-  [[ "$arch" == "amd64" ]] && node_arch="linux-x64"
-
-  local node_ver="v20.19.2"
-  local tarball="node-${node_ver}-${node_arch}.tar.xz"
-  local url="https://nodejs.org/dist/${node_ver}/${tarball}"
-
-  if curl -fsSL "$url" -o "/tmp/$tarball"; then
-    tar -xJf "/tmp/$tarball" -C /usr/local --strip-components=1
-    rm -f "/tmp/$tarball"
-    info "Installed Node.js $(node -v) from official binary"
-    return 0
-  fi
-
-  return 1
+node_version_ok() {
+  command -v node >/dev/null 2>&1 || return 1
+  local ver
+  ver=$(node -v 2>/dev/null | cut -c2- | cut -d. -f1)
+  [[ "$ver" -ge $NODE_MIN ]] 2>/dev/null
 }
 
-if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -c2- | cut -d. -f1)" -lt $NODE_MIN ]]; then
-  spin "Installing Node.js ${NODE_MIN}+" install_node
+if ! node_version_ok; then
+  echo "  ${C_DIM}Trying system repos first (apt install nodejs npm)...${C_RESET}"
+  apt-get install -y -qq nodejs npm >/dev/null 2>&1 || true
+
+  if ! node_version_ok; then
+    echo "  ${C_DIM}System repo didn't provide Node ${NODE_MIN}+, trying NodeSource...${C_RESET}"
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN}.x" 2>/dev/null | bash - >/dev/null 2>&1 || true
+    apt-get install -y -qq nodejs >/dev/null 2>&1 || true
+  fi
+
+  if ! node_version_ok; then
+    echo "  ${C_DIM}NodeSource not available, downloading official binary...${C_RESET}"
+    local_arch="linux-arm64"
+    [[ "$ARCH" == "armhf" ]] && local_arch="linux-armv7l"
+    [[ "$ARCH" == "amd64" ]] && local_arch="linux-x64"
+    node_ver="v20.19.2"
+    tarball="node-${node_ver}-${local_arch}.tar.xz"
+    url="https://nodejs.org/dist/${node_ver}/${tarball}"
+    curl -fsSL "$url" -o "/tmp/$tarball" || die "Failed to download Node.js binary from $url"
+    tar -xJf "/tmp/$tarball" -C /usr/local --strip-components=1
+    rm -f "/tmp/$tarball"
+  fi
+
+  node_version_ok || die "Failed to install Node.js ${NODE_MIN}+. Please install manually and re-run."
+  info "Installed Node.js $(node -v)"
 else
   info "Node.js $(node -v) already installed — skipping"
-fi
-
-if ! command -v node >/dev/null 2>&1; then
-  die "Failed to install Node.js. Please install Node.js ${NODE_MIN}+ manually and re-run this script."
 fi
 
 echo "  ${C_DIM}Node: $(node -v)  npm: $(npm -v)${C_RESET}"
@@ -324,15 +311,15 @@ ROTATION=$(whiptail --title "Step 4: Screen Orientation" --menu \
   3>&1 1>&2 2>&3) || die "Cancelled by user"
 
 # Map numeric choice to wlr-randr transform names
-declare -A WLR_TRANSFORMS=(
-  [0]="normal"
-  [1]="90"
-  [2]="180"
-  [3]="270"
-)
-WLR_TRANSFORM="${WLR_TRANSFORMS[$ROTATION]}"
+case "$ROTATION" in
+  0) WLR_TRANSFORM="normal" ;;
+  1) WLR_TRANSFORM="90" ;;
+  2) WLR_TRANSFORM="180" ;;
+  3) WLR_TRANSFORM="270" ;;
+  *) WLR_TRANSFORM="normal" ;;
+esac
 
-# --- Apply rotation via KMS config.txt (takes effect at boot) ---
+# Apply rotation via KMS config.txt (takes effect at boot)
 CONFIG_TXT="/boot/firmware/config.txt"
 [[ -f "$CONFIG_TXT" ]] || CONFIG_TXT="/boot/config.txt"
 
@@ -346,8 +333,6 @@ else
   warn "Could not find config.txt — skipping KMS rotation"
 fi
 
-# --- Also set up wlr-randr for Wayland sessions (Trixie/Bookworm) ---
-# This is applied in the kiosk launcher script at login time
 info "Wayland rotation: wlr-randr --transform $WLR_TRANSFORM (applied at login)"
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -398,37 +383,50 @@ info "Wrote $ENV_FILE (permissions: 600)"
 # ═══════════════════════════════════════════════════════════════════════════════
 step "Installing npm packages and building"
 
-echo "  ${C_DIM}This may take a few minutes on a Raspberry Pi...${C_RESET}"
+echo "  ${C_DIM}This may take several minutes on a Raspberry Pi...${C_RESET}"
 
-# --- Ensure enough swap for the build (Next.js TypeScript check is memory-hungry) ---
+# --- Ensure enough memory for the build ---
 TOTAL_MEM_MB=$(awk '/MemTotal/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null || echo "0")
 CURRENT_SWAP_MB=$(awk '/SwapTotal/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null || echo "0")
+SWAP_INCREASED=false
+
+echo "  ${C_DIM}Memory: ${TOTAL_MEM_MB}MB RAM + ${CURRENT_SWAP_MB}MB swap${C_RESET}"
 
 if [[ $((TOTAL_MEM_MB + CURRENT_SWAP_MB)) -lt 1024 ]]; then
-  echo "  ${C_DIM}Low memory detected (${TOTAL_MEM_MB}MB RAM + ${CURRENT_SWAP_MB}MB swap)${C_RESET}"
-  echo "  ${C_DIM}Temporarily increasing swap to 2GB for the build...${C_RESET}"
-  SWAP_INCREASED=true
-  if command -v dphys-swapfile >/dev/null 2>&1; then
-    # Save original swap size so we can restore it later
+  echo "  ${C_DIM}Low memory — increasing swap to 2GB for the build...${C_RESET}"
+
+  # Try dphys-swapfile first, then raw fallocate
+  if command -v dphys-swapfile >/dev/null 2>&1 && [[ -f /etc/dphys-swapfile ]]; then
     ORIG_SWAP=$(grep -E '^CONF_SWAPSIZE=' /etc/dphys-swapfile 2>/dev/null | cut -d= -f2 || echo "100")
     dphys-swapfile swapoff >/dev/null 2>&1 || true
     sed -i "s/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=2048/" /etc/dphys-swapfile
-    dphys-swapfile setup >/dev/null 2>&1
-    dphys-swapfile swapon >/dev/null 2>&1
-    info "Swap increased to 2GB for build"
-  else
-    # Fallback: create a swap file directly
-    if [[ ! -f /tmp/wallboard-build-swap ]]; then
-      dd if=/dev/zero of=/tmp/wallboard-build-swap bs=1M count=2048 status=none 2>/dev/null
-      chmod 600 /tmp/wallboard-build-swap
-      mkswap /tmp/wallboard-build-swap >/dev/null 2>&1
-      swapon /tmp/wallboard-build-swap 2>/dev/null
-      info "Created temporary 2GB swap file for build"
+    if dphys-swapfile setup >/dev/null 2>&1 && dphys-swapfile swapon >/dev/null 2>&1; then
+      SWAP_INCREASED=true
+      info "Swap increased to 2GB via dphys-swapfile"
+    else
+      warn "dphys-swapfile failed, trying fallocate..."
     fi
   fi
-else
-  SWAP_INCREASED=false
-  echo "  ${C_DIM}Memory: ${TOTAL_MEM_MB}MB RAM + ${CURRENT_SWAP_MB}MB swap — sufficient${C_RESET}"
+
+  if [[ "$SWAP_INCREASED" == false ]]; then
+    # Fallback: create a swap file directly
+    SWAP_FILE="/tmp/wallboard-build-swap"
+    rm -f "$SWAP_FILE"
+    if dd if=/dev/zero of="$SWAP_FILE" bs=1M count=2048 status=progress 2>/dev/null && \
+       chmod 600 "$SWAP_FILE" && \
+       mkswap "$SWAP_FILE" >/dev/null 2>&1 && \
+       swapon "$SWAP_FILE" 2>/dev/null; then
+      SWAP_INCREASED=true
+      info "Swap increased to 2GB via swap file"
+    else
+      warn "Could not increase swap"
+      warn "If the build fails with OOM, run: sudo fallocate -l 2G /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"
+    fi
+  fi
+
+  # Show new memory status
+  NEW_SWAP_MB=$(awk '/SwapTotal/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null || echo "0")
+  echo "  ${C_DIM}Memory now: ${TOTAL_MEM_MB}MB RAM + ${NEW_SWAP_MB}MB swap${C_RESET}"
 fi
 
 # --- Install packages ---
@@ -441,34 +439,33 @@ else
 fi
 
 # --- Build ---
-# Turbopack doesn't support 32-bit ARM — fall back to Webpack on armhf
 BUILD_CMD="npm run build"
-ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
 NODE_OPTS=""
 if [[ "$ARCH" == "armhf" || "$ARCH" == "armv7l" ]]; then
+  # Turbopack doesn't support 32-bit ARM; use Webpack instead
   BUILD_CMD="npx next build --webpack"
   # Give Node more heap space on memory-constrained 32-bit systems
   NODE_OPTS="--max-old-space-size=512"
-  echo "  ${C_DIM}32-bit ARM detected — using Webpack + increased heap size${C_RESET}"
+  echo "  ${C_DIM}32-bit ARM detected — using Webpack + 512MB heap limit${C_RESET}"
 fi
 
 spin "Building Next.js production bundle (this takes several minutes on a Pi)" \
   sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && NODE_OPTIONS='$NODE_OPTS' $BUILD_CMD"
 
-# --- Restore original swap if we increased it ---
+# --- Restore swap ---
 if [[ "$SWAP_INCREASED" == true ]]; then
-  echo "  ${C_DIM}Restoring original swap configuration...${C_RESET}"
-  if command -v dphys-swapfile >/dev/null 2>&1; then
+  echo "  ${C_DIM}Restoring original swap...${C_RESET}"
+  if command -v dphys-swapfile >/dev/null 2>&1 && [[ -f /etc/dphys-swapfile ]]; then
     dphys-swapfile swapoff >/dev/null 2>&1 || true
-    sed -i "s/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=${ORIG_SWAP:-100}/" /etc/dphys-swapfile
-    dphys-swapfile setup >/dev/null 2>&1
-    dphys-swapfile swapon >/dev/null 2>&1
-    info "Swap restored to ${ORIG_SWAP:-100}MB"
-  else
+    sed -i "s/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=${ORIG_SWAP:-100}/" /etc/dphys-swapfile 2>/dev/null || true
+    dphys-swapfile setup >/dev/null 2>&1 || true
+    dphys-swapfile swapon >/dev/null 2>&1 || true
+  fi
+  if [[ -f "/tmp/wallboard-build-swap" ]]; then
     swapoff /tmp/wallboard-build-swap 2>/dev/null || true
     rm -f /tmp/wallboard-build-swap
-    info "Temporary swap file removed"
   fi
+  info "Swap restored"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -498,9 +495,9 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 EOF
 
-spin "Reloading systemd daemon" systemctl daemon-reload
-spin "Enabling proxmox-wallboard.service" systemctl enable proxmox-wallboard.service
-info "Service will start automatically on boot"
+systemctl daemon-reload || warn "systemctl daemon-reload failed"
+systemctl enable proxmox-wallboard.service >/dev/null 2>&1 || warn "Could not enable service"
+info "proxmox-wallboard.service enabled (starts on boot)"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 8: Chromium kiosk autostart
@@ -531,7 +528,6 @@ cat > "$KIOSK_SCRIPT" <<KIOSK
 
 # ── Apply display rotation (Wayland via wlr-randr) ──
 if command -v wlr-randr >/dev/null 2>&1 && [[ -n "\${WAYLAND_DISPLAY:-}" ]]; then
-  # Give the compositor a moment to initialize outputs
   sleep 2
   wlr-randr --transform $WLR_TRANSFORM 2>/dev/null && \\
     echo "Applied Wayland rotation: $WLR_TRANSFORM"
@@ -544,21 +540,10 @@ if command -v unclutter >/dev/null 2>&1; then
 fi
 
 # ── Disable screen blanking ──
-# X11 path (Bullseye / XWayland fallback)
 if [[ -n "\${DISPLAY:-}" ]]; then
   xset s off 2>/dev/null || true
   xset -dpms 2>/dev/null || true
   xset s noblank 2>/dev/null || true
-  echo "X11 screen blanking disabled"
-fi
-# Wayland path: write a labwc rc snippet to disable idle timeout
-# (labwc reads this on the fly for idle policy)
-LABWC_ENV="$REAL_HOME/.config/labwc/environment"
-if [[ -d "$REAL_HOME/.config/labwc" ]]; then
-  mkdir -p "\$(dirname "\$LABWC_ENV")"
-  if ! grep -qF "SWAYSOCK" "\$LABWC_ENV" 2>/dev/null; then
-    echo "# Disable idle timeout for wallboard kiosk" >> "\$LABWC_ENV"
-  fi
 fi
 
 # ── Wait for the wallboard server (up to 120 seconds) ──
@@ -595,32 +580,25 @@ info "Created kiosk launcher: $KIOSK_SCRIPT"
 # --- Write autostart entries ---
 echo "  ${C_DIM}Writing desktop autostart entries...${C_RESET}"
 
-# labwc autostart (Trixie + Bookworm — primary path)
-echo "  ${C_DIM}Setting up labwc autostart (Wayland compositor)...${C_RESET}"
+# labwc autostart (Trixie + Bookworm — primary)
 LABWC_DIR="$REAL_HOME/.config/labwc"
 LABWC_AUTOSTART="$LABWC_DIR/autostart"
 sudo -u "$REAL_USER" mkdir -p "$LABWC_DIR"
-# Append if not already present; don't clobber existing entries
 if ! grep -qF "start-wallboard-kiosk" "$LABWC_AUTOSTART" 2>/dev/null; then
   echo "bash $KIOSK_SCRIPT &" >> "$LABWC_AUTOSTART"
   chown "$REAL_USER:$REAL_USER" "$LABWC_AUTOSTART"
 fi
 info "Added labwc autostart entry"
 
-# Disable labwc idle (screen blanking) by writing an rc.xml override if needed
+# Disable labwc screen blanking
 LABWC_RC="$LABWC_DIR/rc.xml"
 if [[ ! -f "$LABWC_RC" ]] || ! grep -qF "<screenBlankTimeout>" "$LABWC_RC" 2>/dev/null; then
-  # Only add the idle-disable snippet; preserve any existing rc.xml content
-  if [[ -f "$LABWC_RC" ]]; then
-    # Insert before </labwc> closing tag
-    if grep -qF "</labwc>" "$LABWC_RC"; then
-      sed -i 's|</labwc>|  <!-- Disable screen blanking for wallboard kiosk -->\n  <screenBlankTimeout>0</screenBlankTimeout>\n</labwc>|' "$LABWC_RC"
-    fi
+  if [[ -f "$LABWC_RC" ]] && grep -qF "</labwc>" "$LABWC_RC"; then
+    sed -i 's|</labwc>|  <screenBlankTimeout>0</screenBlankTimeout>\n</labwc>|' "$LABWC_RC"
   else
     cat > "$LABWC_RC" <<RCXML
 <?xml version="1.0"?>
 <labwc_config>
-  <!-- Disable screen blanking for wallboard kiosk -->
   <screenBlankTimeout>0</screenBlankTimeout>
 </labwc_config>
 RCXML
@@ -642,7 +620,7 @@ EOF
 chown "$REAL_USER:$REAL_USER" "$XDG_AUTOSTART_DIR/proxmox-wallboard.desktop"
 info "Added XDG autostart entry (fallback)"
 
-# LXDE autostart (Bullseye only — if the session dir exists)
+# LXDE autostart (Bullseye only)
 LXDE_AUTOSTART="$REAL_HOME/.config/lxsession/LXDE-pi/autostart"
 if [[ -d "$REAL_HOME/.config/lxsession/LXDE-pi" ]]; then
   if ! grep -qF "start-wallboard-kiosk" "$LXDE_AUTOSTART" 2>/dev/null; then
@@ -660,8 +638,13 @@ step "Finalizing system settings"
 echo "  ${C_DIM}Configuring auto-login and display settings...${C_RESET}"
 
 if command -v raspi-config >/dev/null 2>&1; then
-  spin "Enabling desktop auto-login" raspi-config nonint do_boot_behaviour B4
-  spin "Disabling screen blanking (raspi-config)" raspi-config nonint do_blanking 1
+  raspi-config nonint do_boot_behaviour B4 2>/dev/null && \
+    info "Enabled desktop auto-login" || \
+    warn "Could not enable auto-login via raspi-config — enable it manually in raspi-config"
+
+  raspi-config nonint do_blanking 1 2>/dev/null && \
+    info "Disabled screen blanking (raspi-config)" || \
+    warn "Could not disable screen blanking via raspi-config"
 else
   warn "raspi-config not found — please enable desktop auto-login manually"
 fi
@@ -678,7 +661,7 @@ echo "${C_GREEN}  ║${C_RESET}  ✓ Systemd service   ${C_DIM}proxmox-wallboard
 echo "${C_GREEN}  ║${C_RESET}  ✓ Kiosk mode        ${C_DIM}Chromium fullscreen on boot${C_RESET}          ${C_GREEN}║${C_RESET}"
 echo "${C_GREEN}  ║${C_RESET}  ✓ Auto-login        ${C_DIM}desktop login on boot${C_RESET}                ${C_GREEN}║${C_RESET}"
 echo "${C_GREEN}  ║${C_RESET}  ✓ Display           ${C_DIM}rotation=${WLR_TRANSFORM}, blanking off${C_RESET}        ${C_GREEN}║${C_RESET}"
-echo "${C_GREEN}  ║${C_RESET}  ✓ OS                ${C_DIM}${OS_CODENAME}${C_RESET}                                ${C_GREEN}║${C_RESET}"
+echo "${C_GREEN}  ║${C_RESET}  ✓ OS                ${C_DIM}${OS_CODENAME} (${ARCH})${C_RESET}                        ${C_GREEN}║${C_RESET}"
 echo "${C_BOLD}${C_GREEN}  ╚═══════════════════════════════════════════════════════════╝${C_RESET}"
 echo
 echo "  ${C_BOLD}After reboot the wallboard will start automatically.${C_RESET}"
