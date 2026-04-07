@@ -400,6 +400,38 @@ step "Installing npm packages and building"
 
 echo "  ${C_DIM}This may take a few minutes on a Raspberry Pi...${C_RESET}"
 
+# --- Ensure enough swap for the build (Next.js TypeScript check is memory-hungry) ---
+TOTAL_MEM_MB=$(awk '/MemTotal/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null || echo "0")
+CURRENT_SWAP_MB=$(awk '/SwapTotal/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null || echo "0")
+
+if [[ $((TOTAL_MEM_MB + CURRENT_SWAP_MB)) -lt 1024 ]]; then
+  echo "  ${C_DIM}Low memory detected (${TOTAL_MEM_MB}MB RAM + ${CURRENT_SWAP_MB}MB swap)${C_RESET}"
+  echo "  ${C_DIM}Temporarily increasing swap to 2GB for the build...${C_RESET}"
+  SWAP_INCREASED=true
+  if command -v dphys-swapfile >/dev/null 2>&1; then
+    # Save original swap size so we can restore it later
+    ORIG_SWAP=$(grep -E '^CONF_SWAPSIZE=' /etc/dphys-swapfile 2>/dev/null | cut -d= -f2 || echo "100")
+    dphys-swapfile swapoff >/dev/null 2>&1 || true
+    sed -i "s/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=2048/" /etc/dphys-swapfile
+    dphys-swapfile setup >/dev/null 2>&1
+    dphys-swapfile swapon >/dev/null 2>&1
+    info "Swap increased to 2GB for build"
+  else
+    # Fallback: create a swap file directly
+    if [[ ! -f /tmp/wallboard-build-swap ]]; then
+      dd if=/dev/zero of=/tmp/wallboard-build-swap bs=1M count=2048 status=none 2>/dev/null
+      chmod 600 /tmp/wallboard-build-swap
+      mkswap /tmp/wallboard-build-swap >/dev/null 2>&1
+      swapon /tmp/wallboard-build-swap 2>/dev/null
+      info "Created temporary 2GB swap file for build"
+    fi
+  fi
+else
+  SWAP_INCREASED=false
+  echo "  ${C_DIM}Memory: ${TOTAL_MEM_MB}MB RAM + ${CURRENT_SWAP_MB}MB swap — sufficient${C_RESET}"
+fi
+
+# --- Install packages ---
 if [[ -f "$PROJECT_DIR/package-lock.json" ]]; then
   spin "Installing npm packages (npm ci)" \
     sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && npm ci --loglevel=error"
@@ -408,16 +440,36 @@ else
     sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && npm install --loglevel=error"
 fi
 
+# --- Build ---
 # Turbopack doesn't support 32-bit ARM — fall back to Webpack on armhf
 BUILD_CMD="npm run build"
 ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+NODE_OPTS=""
 if [[ "$ARCH" == "armhf" || "$ARCH" == "armv7l" ]]; then
   BUILD_CMD="npx next build --webpack"
-  echo "  ${C_DIM}32-bit ARM detected — using Webpack instead of Turbopack${C_RESET}"
+  # Give Node more heap space on memory-constrained 32-bit systems
+  NODE_OPTS="--max-old-space-size=512"
+  echo "  ${C_DIM}32-bit ARM detected — using Webpack + increased heap size${C_RESET}"
 fi
 
-spin "Building Next.js production bundle" \
-  sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && $BUILD_CMD"
+spin "Building Next.js production bundle (this takes several minutes on a Pi)" \
+  sudo -u "$REAL_USER" bash -c "cd '$PROJECT_DIR' && NODE_OPTIONS='$NODE_OPTS' $BUILD_CMD"
+
+# --- Restore original swap if we increased it ---
+if [[ "$SWAP_INCREASED" == true ]]; then
+  echo "  ${C_DIM}Restoring original swap configuration...${C_RESET}"
+  if command -v dphys-swapfile >/dev/null 2>&1; then
+    dphys-swapfile swapoff >/dev/null 2>&1 || true
+    sed -i "s/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=${ORIG_SWAP:-100}/" /etc/dphys-swapfile
+    dphys-swapfile setup >/dev/null 2>&1
+    dphys-swapfile swapon >/dev/null 2>&1
+    info "Swap restored to ${ORIG_SWAP:-100}MB"
+  else
+    swapoff /tmp/wallboard-build-swap 2>/dev/null || true
+    rm -f /tmp/wallboard-build-swap
+    info "Temporary swap file removed"
+  fi
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 7: Systemd service
