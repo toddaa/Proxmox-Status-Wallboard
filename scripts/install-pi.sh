@@ -538,7 +538,7 @@ fi
 
 # ── Hide the mouse cursor ──
 if command -v unclutter >/dev/null 2>&1; then
-  unclutter -idle 0.5 -root &
+  unclutter -idle 0 &
   echo "Cursor hidden via unclutter"
 fi
 
@@ -593,22 +593,20 @@ if ! grep -qF "start-wallboard-kiosk" "$LABWC_AUTOSTART" 2>/dev/null; then
 fi
 info "Added labwc autostart entry"
 
-# Disable labwc screen blanking
+# Disable labwc screen blanking + hide cursor
 LABWC_RC="$LABWC_DIR/rc.xml"
-if [[ ! -f "$LABWC_RC" ]] || ! grep -qF "<screenBlankTimeout>" "$LABWC_RC" 2>/dev/null; then
-  if [[ -f "$LABWC_RC" ]] && grep -qF "</labwc>" "$LABWC_RC"; then
-    sed -i 's|</labwc>|  <screenBlankTimeout>0</screenBlankTimeout>\n</labwc>|' "$LABWC_RC"
-  else
-    cat > "$LABWC_RC" <<RCXML
+cat > "$LABWC_RC" <<RCXML
 <?xml version="1.0"?>
 <labwc_config>
   <screenBlankTimeout>0</screenBlankTimeout>
+  <cursor>
+    <hide>true</hide>
+    <hideTimeout>0</hideTimeout>
+  </cursor>
 </labwc_config>
 RCXML
-    chown "$REAL_USER:$REAL_USER" "$LABWC_RC"
-  fi
-  info "Disabled labwc screen blanking (rc.xml)"
-fi
+chown "$REAL_USER:$REAL_USER" "$LABWC_RC"
+info "Configured labwc: screen blanking off, cursor hidden (rc.xml)"
 
 # XDG autostart (fallback for other DEs)
 XDG_AUTOSTART_DIR="$REAL_HOME/.config/autostart"

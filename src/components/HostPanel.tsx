@@ -2,6 +2,7 @@
 
 import type { HostData, GuestData } from "@/types/proxmox";
 import { formatBytes, formatRate } from "@/lib/format";
+import { healthColor } from "@/lib/health";
 import RingGauge from "./RingGauge";
 
 interface HostPanelProps {
@@ -18,6 +19,7 @@ export default function HostPanel({ host, guests }: HostPanelProps) {
       : "0.0";
   const diskPct = ((host.rootUsed / host.rootTotal) * 100).toFixed(1);
   const iowPct = host.ioWait.toFixed(1);
+  const iowColor = healthColor(host.ioWait);
   const loadStr = Array.isArray(host.loadavg)
     ? host.loadavg.map((l) => parseFloat(l).toFixed(2)).join("  ")
     : "—";
@@ -175,14 +177,11 @@ export default function HostPanel({ host, guests }: HostPanelProps) {
         <div className="metric-card">
           <RingGauge
             percent={parseFloat(iowPct)}
-            color="var(--accent-iowait)"
+            color={iowColor}
             value={iowPct}
             unit="%"
           />
-          <div
-            className="metric-label"
-            style={{ color: "var(--accent-iowait)" }}
-          >
+          <div className="metric-label" style={{ color: iowColor }}>
             IO Wait
           </div>
         </div>

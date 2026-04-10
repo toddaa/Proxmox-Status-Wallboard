@@ -17,10 +17,10 @@
   --accent-disk: #7fff00;
   --accent-net: #00e676;
   --accent-swap: #76ff03;
-  --accent-iowait: #ff3131;
 
   --status-running: #00ff41;
   --status-stopped: #3a5a3a;
+  --status-warn: #ffcc00;
   --status-error: #ff3131;
   --ring-track: #0a1f0a;
 
@@ -402,10 +402,10 @@ body {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 18px 20px;
+  padding: 22px 24px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 20px;
   position: relative;
   overflow: hidden;
   transition: border-color 0.3s;
@@ -465,13 +465,13 @@ body {
 
 .guest-card-name {
   font-weight: 500;
-  font-size: 14px;
+  font-size: 16px;
   letter-spacing: 0.5px;
   color: var(--text-primary);
 }
 
 .guest-vmid {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-dim);
 }
 
@@ -493,51 +493,19 @@ body {
 
 .guest-metrics-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px 20px;
+  flex: 1;
+  align-content: space-around;
+  justify-items: center;
 }
 
-.mini-metric {
+.guest-metric-cell {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
-
-.mini-metric-header {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
-}
-
-.mini-metric-label {
-  font-size: 9px;
-  font-weight: 500;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 1px;
-}
-
-.mini-metric-value {
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.mini-bar-track {
-  height: 4px;
-  background: var(--ring-track);
-  border-radius: 2px;
-  overflow: hidden;
-}
-
-.mini-bar-fill {
-  height: 100%;
-  border-radius: 2px;
-  transition: width 1.5s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.net-detail {
-  font-size: 9px;
-  line-height: 1.4;
+  gap: 6px;
+  text-align: center;
 }
 
 .guest-footer {
@@ -549,7 +517,7 @@ body {
 }
 
 .guest-uptime {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-dim);
 }
 
