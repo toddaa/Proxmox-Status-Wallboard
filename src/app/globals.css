@@ -48,6 +48,16 @@ body {
   overflow: hidden;
 }
 
+/* ── Kiosk: hide the mouse cursor ─────────────────────────────────────────
+   unclutter doesn't work on Wayland/labwc, and Chromium has no Wayland
+   flag for this. CSS is the reliable path — fullscreen kiosk means this
+   covers the whole screen. */
+*,
+*::before,
+*::after {
+  cursor: none !important;
+}
+
 .font-mono {
   font-family: var(--font-mono);
 }

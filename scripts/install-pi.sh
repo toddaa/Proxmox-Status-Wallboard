@@ -155,9 +155,6 @@ spin "Updating apt package lists" apt-get update -qq
   echo "45"; echo "# Installing labwc (Wayland compositor)..."
   apt-get install -y -qq labwc >/dev/null 2>&1 || true
 
-  echo "55"; echo "# Installing unclutter (hides mouse cursor)..."
-  apt-get install -y -qq unclutter >/dev/null 2>&1 || true
-
   echo "70"; echo "# Installing Chromium browser..."
   apt-get install -y -qq chromium >/dev/null 2>&1 || \
     apt-get install -y -qq chromium-browser >/dev/null 2>&1 || true
@@ -173,7 +170,7 @@ for cmd in curl git vim labwc; do
   command -v "$cmd" >/dev/null 2>&1 || die "Failed to install $cmd — check your apt sources"
 done
 
-info "Installed: curl, git, build-essential, vim, labwc, unclutter, chromium, wlr-randr"
+info "Installed: curl, git, build-essential, vim, labwc, chromium, wlr-randr"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 2: Node.js
@@ -548,11 +545,8 @@ if command -v wlr-randr >/dev/null 2>&1 && [[ -n "\${WAYLAND_DISPLAY:-}" ]]; the
   fi
 fi
 
-# ── Hide the mouse cursor ──
-if command -v unclutter >/dev/null 2>&1; then
-  unclutter -idle 0 &
-  echo "Cursor hidden via unclutter"
-fi
+# ── Cursor hiding is handled in CSS (cursor: none on the wallboard page).
+#    unclutter is X11-only and does nothing on Wayland/labwc.
 
 # ── Disable screen blanking ──
 if [[ -n "\${DISPLAY:-}" ]]; then
@@ -611,14 +605,10 @@ cat > "$LABWC_RC" <<RCXML
 <?xml version="1.0"?>
 <labwc_config>
   <screenBlankTimeout>0</screenBlankTimeout>
-  <cursor>
-    <hide>true</hide>
-    <hideTimeout>0</hideTimeout>
-  </cursor>
 </labwc_config>
 RCXML
 chown "$REAL_USER:$REAL_USER" "$LABWC_RC"
-info "Configured labwc: screen blanking off, cursor hidden (rc.xml)"
+info "Configured labwc: screen blanking off (rc.xml)"
 
 # XDG autostart (fallback for other DEs)
 XDG_AUTOSTART_DIR="$REAL_HOME/.config/autostart"
