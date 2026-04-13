@@ -530,10 +530,22 @@ cat > "$KIOSK_SCRIPT" <<KIOSK
 #
 
 # ── Apply display rotation (Wayland via wlr-randr) ──
+# Auto-detects the output name (HDMI-A-1, HDMI-A-2, DP-1, etc.) and
+# waits for it to appear — needed because autostart may fire before the
+# compositor has finished bringing up outputs.
 if command -v wlr-randr >/dev/null 2>&1 && [[ -n "\${WAYLAND_DISPLAY:-}" ]]; then
-  sleep 2
-  wlr-randr --transform $WLR_TRANSFORM 2>/dev/null && \\
-    echo "Applied Wayland rotation: $WLR_TRANSFORM"
+  ROT_OUTPUT=""
+  for _i in \$(seq 1 20); do
+    ROT_OUTPUT=\$(wlr-randr 2>/dev/null | awk 'NR==1 && /^[A-Za-z]/ {print \$1; exit}')
+    [[ -n "\$ROT_OUTPUT" ]] && break
+    sleep 0.5
+  done
+  if [[ -n "\$ROT_OUTPUT" ]]; then
+    wlr-randr --output "\$ROT_OUTPUT" --transform $WLR_TRANSFORM && \\
+      echo "Applied Wayland rotation: $WLR_TRANSFORM on \$ROT_OUTPUT"
+  else
+    echo "No Wayland output detected — rotation skipped"
+  fi
 fi
 
 # ── Hide the mouse cursor ──
